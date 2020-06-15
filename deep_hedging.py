@@ -25,13 +25,13 @@ sigma = 0.20
 
 # Neural network structure
 m = 1  # dimension of price
-d = 2  # number of layers in strategy
+d = 3  # number of layers in strategy
 n = 32  # nodes in the layers (common in all intermediate layers)
 
 # Learning params
 NUM_TRAIN = 10**5
 NUM_TEST = 10**5
-EPOCH = 500
+EPOCH = 20
 BATCH_SIZE = 256
 
 
@@ -64,23 +64,42 @@ def main():
     # Architecture
     # architecture is the same for all networks(from t=0 to T)
     layers = []
+    # batch normalized layers
     for j in range(N):
         for i in range(d):
             if i < d-1:
+                # Use he_normal for weight initialization
+                # see also: https://qiita.com/mgmk2/items/dc562303e178aa6306ca
                 nodes = n
-                layer = Dense(nodes, activation='relu', trainable=True,
-                              kernel_initializer=initializers.RandomNormal(
-                                  0, 1),
+                layer = Dense(nodes,
+                              kernel_initializer=initializers.he_normal(),
                               bias_initializer='random_normal',
                               name=str(i)+str(j))
             else:
                 nodes = m
-                layer = Dense(nodes, activation='linear', trainable=True,
-                              kernel_initializer=initializers.RandomNormal(
-                                  0, 1),
+                layer = Dense(nodes, trainable=True,
+                              kernel_initializer=initializers.he_uniform(),
                               bias_initializer='random_normal',
                               name=str(i)+str(j))
             layers.append(layer)
+    # not batch normalized layers
+    # for j in range(N):
+    #     for i in range(d):
+    #         if i < d-1:
+    #             nodes = n
+    #             layer = Dense(nodes, activation='relu', trainable=True,
+    #                           kernel_initializer=initializers.RandomNormal(
+    #                               0, 1),
+    #                           bias_initializer='random_normal',
+    #                           name=str(i)+str(j))
+    #         else:
+    #             nodes = m
+    #             layer = Dense(nodes, activation='linear', trainable=True,
+    #                           kernel_initializer=initializers.RandomNormal(
+    #                               0, 1),
+    #                           bias_initializer='random_normal',
+    #                           name=str(i)+str(j))
+    #         layers.append(layer)
 
     # Implementing the loss function
     # Initial input is spot and pnl
@@ -91,35 +110,37 @@ def main():
     for j in range(N):
         strategy = price
         for k in range(d):
-            strategy = layers[k+j*d](strategy)
+            # not batch normalized
+            # strategy = layers[k+j*d](strategy)
+
             # batch normalization
-            # this doesn't work...
-            # if k != d - 1:
-            #     strategy = layers[k+j*d](strategy)
-            #     strategy = BatchNormalization()(strategy)
-            #     strategy = Activation('relu')(strategy)
-            # else:
-            #     strategy = layers[k+j*d](strategy)
-            #     strategy = BatchNormalization()(strategy)
-            #     strategy = Activation('linear')(strategy)
+            # see also: https://qiita.com/t-tkd3a/items/14950dbf55f7a3095600
+            if k < d - 1:
+                strategy = layers[k+j*d](strategy)
+                strategy = BatchNormalization()(strategy)
+                strategy = Activation('relu')(strategy)
+            else:
+                strategy = layers[k+j*d](strategy)
+                strategy = BatchNormalization()(strategy)
+                strategy = Activation('linear')(strategy)
         incr = Input(shape=(m,))
-        logprice = Lambda(lambda x: K.log(x))(price)  # s_t -> log(s_t)
-        logprice = Add()([logprice, incr])  # log(s_t) -> log(s_t+1)
-        pricenew = Lambda(lambda x: K.exp(x))(logprice)  # log(s_t+1) -> s_t+1
+        logprice = Lambda(lambda x: K.log(x))(price)  # s_t to log(s_t)
+        logprice = Add()([logprice, incr])  # log(s_t) to log(s_t+1)
+        pricenew = Lambda(lambda x: K.exp(x))(logprice)  # log(s_t+1) to s_t+1
         priceincr = Subtract()([pricenew, price])
         hedgenew = Multiply()([strategy, priceincr])
         hedge = Add()([hedge, hedgenew])
         inputs = inputs + [incr]
         price = pricenew
-
+    # output layer
     priceBS = calculate_BS_price(S0, strike, T, sigma)
     payoff = Lambda(lambda x: 0.5*(K.abs(x-strike)+x-strike) - priceBS)(price)
     outputs = Subtract()([payoff, hedge])  # payoff minus priceBS minus hedge
 
-    # inputs are 1.initial price, 2.hedging strategy(init 0), 3.increments of the log price process
+    # inputs are initial price, hedging strategy(init 0) and increments of the log price process
     model_hedge = Model(inputs=inputs, outputs=outputs)
     # model_hedge.summary()
-    plot_model(model_hedge, to_file='model_hedge_{}.png'.format(
+    plot_model(model_hedge, to_file='result/model_hedge_{}.png'.format(
         datetime.today().strftime("%Y%m%d%H%M")))
 
     # ---------------------------------------
@@ -131,13 +152,14 @@ def main():
 
     # adjust learning rate
     # see https://keras.io/ja/optimizers/
-    adam = Adam(lr=0.005)
+    adam = Adam(lr=0.005)  # original
+    # adam = Adam(lr=0.01)  # original
     model_hedge.compile(optimizer=adam, loss='mean_squared_error')
     model_hedge.fit(x=xtrain, y=ytrain, batch_size=BATCH_SIZE,
                     epochs=EPOCH, verbose=True)
-    model_hedge.save('model_{}.h5'.format(
+    model_hedge.save('result/model_{}.h5'.format(
         datetime.today().strftime("%Y%m%d%H%M")))
-    model_hedge = load_model('model_202005270052.h5', compile=True)
+    # model_hedge = load_model('result/model_202005270052.h5', compile=True)
 
     # show error graph
     fig = plt.figure()
@@ -146,7 +168,8 @@ def main():
     train_mean = np.mean(train_result)
     train_std = np.std(train_result)
     plt.title('err mean:{}, err std:{}'.format(train_mean, train_std))
-    fig.savefig('train_{}.png'.format(datetime.today().strftime("%Y%m%d%H%M")))
+    fig.savefig(
+        'result/train_{}.png'.format(datetime.today().strftime("%Y%m%d%H%M")))
     # print('train mean\t: {}'.format(train_mean))
     # print('train std\t: {}'.format(train_std))
 
@@ -162,7 +185,7 @@ def main():
         'deep hedge train (sample_num:{}, epoch:{})'.format(NUM_TRAIN, EPOCH))
     ax.set_xlabel('stock price')
     ax.set_ylabel('deep hedge pl')
-    fig.savefig('train_plot_{}.png'.format(
+    fig.savefig('result/train_plot_{}.png'.format(
         datetime.today().strftime("%Y%m%d%H%M")))
     fig.show()
 
@@ -178,7 +201,8 @@ def main():
     test_mean = np.mean(test_result)
     test_std = np.std(test_result)
     plt.title('err mean:{}, err std:{}'.format(test_mean, train_std))
-    fig.savefig('test_{}.png'.format(datetime.today().strftime("%Y%m%d%H%M")))
+    fig.savefig(
+        'result/test_{}.png'.format(datetime.today().strftime("%Y%m%d%H%M")))
 
     # show hedge-payoff graph
     stock_price = np.exp(np.sum(xtest[2:], axis=0) + np.log(S0))
@@ -192,10 +216,13 @@ def main():
         'deep hedge test (sample_num:{}, epoch:{})'.format(NUM_TEST, EPOCH))
     ax.set_xlabel('stock price')
     ax.set_ylabel('deep hedge pl')
-    fig.savefig('test_plot_{}.png'.format(
+    fig.savefig('result/test_plot_{}.png'.format(
         datetime.today().strftime("%Y%m%d%H%M")))
     fig.show()
 
 
 if __name__ == '__main__':
+    t = datetime.now()
     main()
+    t = datetime.now() - t
+    print(t)
